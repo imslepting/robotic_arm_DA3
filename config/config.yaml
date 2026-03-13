@@ -1,0 +1,16 @@
+camera:
+  indices: [0]  # 只使用 video0（video2 是虛擬設備，無法讀取）
+  width: 640
+  height: 480
+  api_preference: "CAP_V4L2" # 真實相機使用 V4L2（GStreamer 支援格式轉換）
+
+window:
+  name: "Camera View (MX Brio)"
+  quit_key: "q"
+
+calibration:
+  # 8x11 個格子，則內角點為 (8-1, 11-1)
+  pattern_size: [7, 10] 
+  square_size_mm: 20.0
+  num_samples_required: 8
+  save_path: "config/calibration_params.yml"
