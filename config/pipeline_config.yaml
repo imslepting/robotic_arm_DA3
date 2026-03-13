@@ -1,0 +1,47 @@
+# ============================================
+# DA3 Real-time 3DGS Pipeline Configuration
+# ============================================
+
+# --- Stream Source ---
+stream:
+  url: "http://localhost:5000/video_combined"
+  # Side-by-side format: left half = MX Brio, right half = RealSense
+  buffer_size: 1  # cv2.VideoCapture buffer (keep low for latency)
+
+# --- Camera / Resolution ---
+camera:
+  width: 640
+  height: 480
+  calibration_path: "config/calibration_params.yml"
+
+# --- Temporal Buffering ---
+buffer:
+  capacity: 3  # Number of temporal frames to keep per camera
+
+# --- Model / Inference ---
+inference:
+  model_name: "da3-large"
+  # TensorRT engine path (if available). Set to null to use PyTorch fallback.
+  trt_engine_path: null
+  # Weights for PyTorch fallback
+  weights_path: null  # e.g. "./weights/model.safetensors"
+  config_path: null   # e.g. "./weights/config.json"
+  batch_size: 6       # {L_{t-2}, L_{t-1}, L_t, R_{t-2}, R_{t-1}, R_t}
+  process_res: 504    # DA3 internal processing resolution
+  use_fp16: true
+  use_async: true     # Use torch.cuda.Stream for non-blocking inference
+
+# --- Gaussian Splatting ---
+gaussian:
+  confidence_threshold: 0.8
+  scale_multiplier: 0.01  # Base Gaussian scale relative to depth
+  opacity_default: 0.95
+  max_points: 500000
+
+# --- Viser 3D Viewer ---
+viser:
+  host: "0.0.0.0"
+  port: 8080
+  point_size: 0.005
+  background_color: [0.1, 0.1, 0.15]
+  camera_fov: 60

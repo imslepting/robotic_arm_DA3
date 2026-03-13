@@ -22,3 +22,5 @@ plyfile
 pillow_heif
 safetensors
 pycolmap
+viser>=0.2.0
+pyyaml
