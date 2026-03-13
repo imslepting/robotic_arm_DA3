@@ -162,12 +162,19 @@ class InferenceEngine:
         return batch.unsqueeze(0)  # (1, N, 3, H', W')
 
     @torch.inference_mode()
-    def infer(self, frames: list[np.ndarray]) -> dict:
+    def infer(
+        self,
+        frames: list[np.ndarray],
+        extrinsics: Optional[torch.Tensor] = None,
+        intrinsics: Optional[torch.Tensor] = None,
+    ) -> dict:
         """Run inference on a batch of frames.
 
         Args:
             frames: List of 6 frames [L_{t-2}, L_{t-1}, L_t, R_{t-2}, R_{t-1}, R_t],
                     each (H, W, 3) uint8 BGR.
+            extrinsics: (6, 4, 4) camera extrinsics tensor on GPU.
+            intrinsics: (6, 3, 3) camera intrinsics tensor on GPU.
 
         Returns:
             Dictionary with:
@@ -175,13 +182,16 @@ class InferenceEngine:
                 'conf': (N, H, W) numpy float32 confidence maps
                 'time_ms': inference time in milliseconds
         """
-        # Preprocess
         batch = self.preprocess_frames(frames)
+
+        # Add batch dimension: (6,...) -> (1,6,...)
+        ext = extrinsics.unsqueeze(0).float() if extrinsics is not None else None
+        ixt = intrinsics.unsqueeze(0).float() if intrinsics is not None else None
 
         if self._backend == "tensorrt":
             return self._infer_tensorrt(batch)
         else:
-            return self._infer_pytorch(batch)
+            return self._infer_pytorch(batch, extrinsics=ext, intrinsics=ixt)
 
     @torch.inference_mode()
     def infer_async(self, frames: list[np.ndarray]) -> None:
@@ -229,7 +239,13 @@ class InferenceEngine:
         self._last_result = None
         return result
 
-    def _infer_pytorch(self, batch: torch.Tensor, is_async: bool = False) -> dict:
+    def _infer_pytorch(
+        self,
+        batch: torch.Tensor,
+        extrinsics: Optional[torch.Tensor] = None,
+        intrinsics: Optional[torch.Tensor] = None,
+        is_async: bool = False,
+    ) -> dict:
         """Run inference using PyTorch backend."""
         autocast_dtype = torch.float16 if self.use_fp16 else torch.float32
 
@@ -237,7 +253,7 @@ class InferenceEngine:
         t0 = time.perf_counter()
 
         with torch.autocast(device_type="cuda", dtype=autocast_dtype):
-            output = self._model.model(batch)
+            output = self._model.model(batch, extrinsics=extrinsics, intrinsics=intrinsics)
 
         if not is_async:
             torch.cuda.synchronize(self.device)

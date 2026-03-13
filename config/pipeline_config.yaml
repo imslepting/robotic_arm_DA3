@@ -20,7 +20,7 @@ buffer:
 
 # --- Model / Inference ---
 inference:
-  model_name: "da3-large"
+  model_name: "da3-base"
   # TensorRT engine path (if available). Set to null to use PyTorch fallback.
   trt_engine_path: null
   # Weights for PyTorch fallback

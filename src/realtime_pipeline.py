@@ -103,11 +103,16 @@ def inference_thread(
     frame_buffer: CircularFrameBuffer,
     inference_engine: InferenceEngine,
     depth_decoder: DepthDecoder,
+    pose_manager: PoseManager,
     result_holder: dict,
     result_lock: threading.Lock,
 ):
     """Pull temporal batches from buffer and run DA3 inference."""
     print("[Inference] 等待足夠的時序幀...")
+
+    # Precomputed camera tensors (constant, already on GPU)
+    batch_extrinsics = pose_manager.get_batch_extrinsics()  # (6, 4, 4)
+    batch_intrinsics = pose_manager.get_batch_intrinsics()  # (6, 3, 3)
 
     while not _shutdown.is_set():
         # Wait until buffer has enough frames
@@ -121,9 +126,13 @@ def inference_thread(
             time.sleep(0.01)
             continue
 
-        # Run inference
+        # Run inference with camera parameters
         try:
-            raw_result = inference_engine.infer(batch)
+            raw_result = inference_engine.infer(
+                batch,
+                extrinsics=batch_extrinsics,
+                intrinsics=batch_intrinsics,
+            )
             decoded = depth_decoder.decode(raw_result)
 
             # Also store the current left RGB frame for coloring
@@ -328,7 +337,7 @@ def main():
 
     t_inference = threading.Thread(
         target=inference_thread,
-        args=(frame_buffer, inference_engine, depth_decoder, result_holder, result_lock),
+        args=(frame_buffer, inference_engine, depth_decoder, pose_manager, result_holder, result_lock),
         daemon=True,
         name="InferenceThread",
     )
