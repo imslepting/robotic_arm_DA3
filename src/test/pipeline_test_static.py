@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-DA3 Real-time 3DGS Pipeline — Main Entry Point.
+DA3 Real-time 3DGS Pipeline — Static Test Version
 
-Multi-threaded pipeline:
-  Thread 1 (Capture):   Flask stream → stereo rectification → circular buffer
-  Thread 2 (Inference): buffer → batch assembly → DA3 async inference → depth
-  Thread 3 (Render):    depth → Gaussian projection → Viser 3D viewer
+改為讀取靜態圖片而非 Flask stream。
 
-Usage:
-    python src/realtime_pipeline.py --config config/pipeline_config.yaml
+使用方式:
+    python src/test/pipeline_test_static.py --config config/pipeline_config.yaml
 
 Open the Viser viewer at http://<host>:<port> in a browser.
 """
@@ -51,58 +48,48 @@ signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
 
-# ─── Thread 1: Capture ────────────────────────────────────────
+# ─── Thread 1: Capture (Modified for Static Images) ──────────
 def capture_thread(
-    stream_url: str,
-    rectifier,  # StereoRectifier | None
+    left_image_path: str,
+    right_image_path: str,
+    rectifier: StereoRectifier,
     frame_buffer: CircularFrameBuffer,
-    buffer_size: int = 1,
-    enable_rectification: bool = True,
+    repeat_count: int = 30,  # 重複多少次
 ):
-    """Read frames from Flask stream, optionally rectify, and push to buffer."""
-    print(f"[Capture] 正在連線至串流: {stream_url}")
-    if enable_rectification:
-        print("[Capture] 立體校正模式: 啟用 ✅")
-    else:
-        print("[Capture] 立體校正模式: 停用 ⚠️  (使用原始幀)")
-
-    cap = cv2.VideoCapture(stream_url)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, buffer_size)
-
-    if not cap.isOpened():
-        print("[Capture] ❌ 無法連線至 Flask 伺服器")
+    """讀取靜態圖片，重複推送到 buffer。"""
+    print(f"[Capture] 讀取靜態圖片...")
+    
+    # 讀取左右眼圖片
+    img_left = cv2.imread(left_image_path)
+    img_right = cv2.imread(right_image_path)
+    
+    if img_left is None or img_right is None:
+        print("[Capture] ❌ 無法讀取圖片")
         _shutdown.set()
         return
-
-    print("[Capture] ✅ 串流連線成功")
+    
+    print(f"[Capture] 左眼圖片: {img_left.shape}")
+    print(f"[Capture] 右眼圖片: {img_right.shape}")
+    
+    # Stereo rectification
+    print("[Capture] 執行立體校正...")
+    rect_left, rect_right = rectifier.rectify(img_left, img_right)
+    
+    print("[Capture] ✅ 圖片已讀取，開始推送到 buffer...")
+    
     frame_count = 0
-
-    while not _shutdown.is_set():
-        ret, frame = cap.read()
-        if not ret:
-            # Brief wait and retry
-            time.sleep(0.01)
-            continue
-
-        # Split side-by-side frame into left and right
-        h, w = frame.shape[:2]
-        mid = w // 2
-        img_left = frame[:, :mid]
-        img_right = frame[:, mid:]
-
-        if enable_rectification and rectifier is not None:
-            # Stereo rectification (fast cv2.remap)
-            img_left, img_right = rectifier.rectify(img_left, img_right)
-
+    while not _shutdown.is_set() and frame_count < repeat_count:
         # Push to circular buffer
-        frame_buffer.push(img_left, img_right)
+        frame_buffer.push(rect_left, rect_right)
         frame_count += 1
-
-        if frame_count % 100 == 0:
-            print(f"[Capture] 已接收 {frame_count} 幀")
-
-    cap.release()
-    print("[Capture] 執行緒結束")
+        
+        # 模擬幀率 (約 10 FPS)
+        time.sleep(0.1)
+        
+        if frame_count % 10 == 0:
+            print(f"[Capture] 已推送 {frame_count} 幀")
+    
+    print(f"[Capture] 完成推送 {frame_count} 幀，執行緒結束")
 
 
 # ─── Thread 2: Inference ──────────────────────────────────────
@@ -113,23 +100,13 @@ def inference_thread(
     pose_manager: PoseManager,
     result_holder: dict,
     result_lock: threading.Lock,
-    camera_params_mode: str = "auto",
-    temporal_frames: int = 3,
 ):
     """Pull temporal batches from buffer and run DA3 inference."""
     print("[Inference] 等待足夠的時序幀...")
 
-    # Decide whether to pass camera extrinsics/intrinsics to the model
-    if camera_params_mode == "provided":
-        # Precomputed camera tensors (constant, already on GPU)
-        batch_extrinsics = pose_manager.get_batch_extrinsics()  # (6, 4, 4)
-        batch_intrinsics = pose_manager.get_batch_intrinsics()  # (6, 3, 3)
-        print("[Inference] 使用校正後的相機內外參 (provided mode)")
-    else:
-        # Let the model estimate camera parameters internally
-        batch_extrinsics = None
-        batch_intrinsics = None
-        print("[Inference] 不傳入相機內外參，由模型自行估計 (auto mode)")
+    # Precomputed camera tensors (constant, already on GPU)
+    batch_extrinsics = pose_manager.get_batch_extrinsics()  # (6, 4, 4)
+    batch_intrinsics = pose_manager.get_batch_intrinsics()  # (6, 3, 3)
 
     while not _shutdown.is_set():
         # Wait until buffer has enough frames
@@ -143,7 +120,7 @@ def inference_thread(
             time.sleep(0.01)
             continue
 
-        # Run inference (extrinsics/intrinsics may be None in auto mode)
+        # Run inference with camera parameters
         try:
             raw_result = inference_engine.infer(
                 batch,
@@ -153,12 +130,8 @@ def inference_thread(
             decoded = depth_decoder.decode(raw_result)
 
             # Also store the current left RGB frame for coloring
-            # batch 排列: [L_{t-(N-1)}, ..., L_t, R_{t-(N-1)}, ..., R_t]
-            # L_t 索引 = temporal_frames - 1; R_t 索引 = temporal_frames * 2 - 1
-            idx_lt = temporal_frames - 1
-            idx_rt = temporal_frames * 2 - 1
-            decoded["color_image_left"] = batch[idx_lt]   # L_t
-            decoded["color_image_right"] = batch[idx_rt]  # R_t
+            decoded["color_image_left"] = batch[2]    # L_t
+            decoded["color_image_right"] = batch[5]   # R_t
 
             with result_lock:
                 result_holder["latest"] = decoded
@@ -268,16 +241,28 @@ def load_config(path: str) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="DA3 即時 3DGS 管道")
+    parser = argparse.ArgumentParser(description="DA3 靜態圖片測試版本")
     parser.add_argument(
         "--config", type=str, default="config/pipeline_config.yaml",
         help="Pipeline 設定檔路徑",
+    )
+    parser.add_argument(
+        "--left", type=str, default="assets/examples/SOH/000.png",
+        help="左眼圖片路徑",
+    )
+    parser.add_argument(
+        "--right", type=str, default="assets/examples/SOH/010.png",
+        help="右眼圖片路徑",
+    )
+    parser.add_argument(
+        "--repeat", type=int, default=30,
+        help="重複推送幀數",
     )
     args = parser.parse_args()
 
     config = load_config(args.config)
     print("=" * 60)
-    print("  DA3 即時 3D 高斯潑濺管道")
+    print("  DA3 靜態圖片測試版本 (3DGS)")
     print("=" * 60)
 
     # ── Initialize modules ──
@@ -286,20 +271,14 @@ def main():
     gs_cfg = config["gaussian"]
     vis_cfg = config["viser"]
     buf_cfg = config["buffer"]
-    stream_cfg = config["stream"]
 
     image_size = (cam_cfg["width"], cam_cfg["height"])
-    enable_rectification = cam_cfg.get("enable_rectification", True)
 
-    if enable_rectification:
-        print("\n[Init] 初始化立體校正器...")
-        rectifier = StereoRectifier(
-            calibration_path=cam_cfg["calibration_path"],
-            image_size=image_size,
-        )
-    else:
-        print("\n[Init] 跳過立體校正器初始化 (enable_rectification: false)")
-        rectifier = None
+    print("\n[Init] 初始化立體校正器...")
+    rectifier = StereoRectifier(
+        calibration_path=cam_cfg["calibration_path"],
+        image_size=image_size,
+    )
 
     print("[Init] 初始化位姿管理器...")
     pose_manager = PoseManager(
@@ -307,9 +286,8 @@ def main():
         image_size=image_size,
     )
 
-    temporal_frames = buf_cfg["temporal_frames"]         # N: 每台相機的時序幀數
-    print(f"[Init] 初始化幀環形緩衝區 (temporal_frames={temporal_frames})...")
-    frame_buffer = CircularFrameBuffer(capacity=temporal_frames)
+    print("[Init] 初始化幀環形緩衝區...")
+    frame_buffer = CircularFrameBuffer(capacity=buf_cfg["capacity"])
 
     print("[Init] 初始化推論引擎...")
     inference_engine = InferenceEngine(
@@ -325,7 +303,6 @@ def main():
     print("[Init] 初始化深度解碼器...")
     depth_decoder = DepthDecoder(
         confidence_threshold=gs_cfg["confidence_threshold"],
-        temporal_frames=temporal_frames,
     )
 
     print("[Init] 初始化高斯投影器...")
@@ -357,33 +334,15 @@ def main():
 
     t_capture = threading.Thread(
         target=capture_thread,
-        kwargs={
-            "stream_url": stream_cfg["url"],
-            "rectifier": rectifier,
-            "frame_buffer": frame_buffer,
-            "buffer_size": stream_cfg["buffer_size"],
-            "enable_rectification": enable_rectification,
-        },
+        args=(args.left, args.right, rectifier, frame_buffer, args.repeat),
         daemon=True,
         name="CaptureThread",
     )
     threads.append(t_capture)
 
-    camera_params_mode = inf_cfg.get("camera_params_mode", "auto")
-    print(f"[Init] 相機參數模式: {camera_params_mode}")
-
     t_inference = threading.Thread(
         target=inference_thread,
-        kwargs={
-            "frame_buffer": frame_buffer,
-            "inference_engine": inference_engine,
-            "depth_decoder": depth_decoder,
-            "pose_manager": pose_manager,
-            "result_holder": result_holder,
-            "result_lock": result_lock,
-            "camera_params_mode": camera_params_mode,
-            "temporal_frames": temporal_frames,
-        },
+        args=(frame_buffer, inference_engine, depth_decoder, pose_manager, result_holder, result_lock),
         daemon=True,
         name="InferenceThread",
     )
@@ -405,15 +364,16 @@ def main():
         t.start()
 
     print(f"[Pipeline] ✅ 管道已啟動！")
-    print(f"  串流來源: {stream_cfg['url']}")
+    print(f"  左眼圖片: {args.left}")
+    print(f"  右眼圖片: {args.right}")
     print(f"  3D 檢視器: http://{vis_cfg['host']}:{vis_cfg['port']}")
     print(f"  推論後端: {inference_engine.backend_name}")
     print(f"  按 Ctrl+C 停止")
 
-    # Wait for shutdown
+    # Wait for shutdown or capture thread to finish
     try:
         while not _shutdown.is_set():
-            _shutdown.wait(timeout=1.0)
+            _shutdown.wait(timeout=100.0)
     except KeyboardInterrupt:
         pass
 

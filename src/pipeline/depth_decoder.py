@@ -12,23 +12,25 @@ import numpy as np
 class DepthDecoder:
     """Post-process DA3 inference output to extract usable depth maps.
 
-    The 6-frame batch is ordered as:
-        [L_{t-2}, L_{t-1}, L_t, R_{t-2}, R_{t-1}, R_t]
-        indices:  0        1      2       3        4      5
-
-    We extract index 2 (left at time t) and index 5 (right at time t)
-    as the primary depth maps.
+    The N-frame-per-camera batch is ordered as:
+        [L_{t-(N-1)}, ..., L_t, R_{t-(N-1)}, ..., R_t]
+        L_t index = temporal_frames - 1
+        R_t index = temporal_frames * 2 - 1
 
     Args:
         confidence_threshold: Minimum confidence to keep a depth value.
+        temporal_frames: Number of temporal frames per camera (N). Must match
+            the value set in pipeline_config.yaml buffer.temporal_frames.
     """
 
-    # Batch indices for current time step
-    IDX_LEFT_T = 2
-    IDX_RIGHT_T = 5
-
-    def __init__(self, confidence_threshold: float = 0.8):
+    def __init__(self, confidence_threshold: float = 0.8, temporal_frames: int = 3):
         self.confidence_threshold = confidence_threshold
+        self.temporal_frames = temporal_frames
+        # Batch indices for current time step (dynamic)
+        self.IDX_LEFT_T = temporal_frames - 1
+        self.IDX_RIGHT_T = temporal_frames * 2 - 1
+
+
 
     def decode(self, inference_result: dict) -> dict:
         """Decode inference output to extract current-frame depth maps.

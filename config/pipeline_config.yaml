@@ -13,28 +13,39 @@ camera:
   width: 640
   height: 480
   calibration_path: "config/calibration_params.yml"
+  # Stereo rectification mode:
+  #   true  — 啟用立體校正（需要 calibration_path 中的標定參數）
+  #   false — 跳過校正，直接使用原始幀（適用於已預校正影像或快速測試）
+  enable_rectification: false
 
 # --- Temporal Buffering ---
 buffer:
-  capacity: 3  # Number of temporal frames to keep per camera
+  temporal_frames: 1  # 每台相機輸入模型的時序幀數 N
+                       # Batch 組成: {L_{t-(N-1)}, ..., L_t, R_{t-(N-1)}, ..., R_t}
+                       # batch_size = temporal_frames * 2（左右各 N 幀）
+                       # 建議值: 1（僅當前幀）、2（當前+前一幀）、3（預設）
 
 # --- Model / Inference ---
 inference:
-  model_name: "da3-base"
+  model_name: "da3-giant"
   # TensorRT engine path (if available). Set to null to use PyTorch fallback.
   trt_engine_path: null
   # Weights for PyTorch fallback
   weights_path: null  # e.g. "./weights/model.safetensors"
   config_path: null   # e.g. "./weights/config.json"
-  batch_size: 6       # {L_{t-2}, L_{t-1}, L_t, R_{t-2}, R_{t-1}, R_t}
+  batch_size: null    # 自動計算: buffer.temporal_frames * 2（勿手動設定）
   process_res: 504    # DA3 internal processing resolution
   use_fp16: true
   use_async: true     # Use torch.cuda.Stream for non-blocking inference
+  # Camera parameters mode:
+  #   "auto"     — 不傳入 extrinsics/intrinsics，讓模型自行估計
+  #   "provided" — 使用校正後的相機內外參（由 calibration_path 載入）
+  camera_params_mode: "auto"
 
 # --- Gaussian Splatting ---
 gaussian:
-  confidence_threshold: 0.8
-  scale_multiplier: 0.01  # Base Gaussian scale relative to depth
+  confidence_threshold: 0.3   # 大幅降低以保留所有细节（包括低信心区域）
+  scale_multiplier: 2.0       # 大幅放大到2.0以强调微小的深度变化
   opacity_default: 0.95
   max_points: 500000
 

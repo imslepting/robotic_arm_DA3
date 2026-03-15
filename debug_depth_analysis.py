@@ -35,17 +35,27 @@ def analyze_depth():
     stream_cfg = config["stream"]
     
     image_size = (cam_cfg["width"], cam_cfg["height"])
+    enable_rectification = cam_cfg.get("enable_rectification", True)
+    camera_params_mode = inf_cfg.get("camera_params_mode", "auto")
 
     print("=" * 70)
     print("  深度分析診斷工具")
     print("=" * 70)
+    print(f"  立體校正 (enable_rectification): {'啟用 ✅' if enable_rectification else '停用 ⚠️'}")
+    print(f"  相機參數模式 (camera_params_mode): {camera_params_mode}")
+    print("=" * 70)
 
     # Initialize modules
     print("\n[Init] 初始化模組...")
-    rectifier = StereoRectifier(
-        calibration_path=cam_cfg["calibration_path"],
-        image_size=image_size,
-    )
+    if enable_rectification:
+        rectifier = StereoRectifier(
+            calibration_path=cam_cfg["calibration_path"],
+            image_size=image_size,
+        )
+        print("[Init] 立體校正器已初始化")
+    else:
+        rectifier = None
+        print("[Init] 跳過立體校正器初始化 (enable_rectification: false)")
 
     pose_manager = PoseManager(
         calibration_path=cam_cfg["calibration_path"],
@@ -90,9 +100,15 @@ def analyze_depth():
 
     print("[流媒体] ✅ 连接成功，开始采集样本...")
 
-    # Collect samples
-    batch_extrinsics = pose_manager.get_batch_extrinsics()
-    batch_intrinsics = pose_manager.get_batch_intrinsics()
+    # Decide whether to pass camera parameters based on config
+    if camera_params_mode == "provided":
+        batch_extrinsics = pose_manager.get_batch_extrinsics()
+        batch_intrinsics = pose_manager.get_batch_intrinsics()
+        print(f"[相機參數] 使用校正後的相機內外參 (provided mode)")
+    else:
+        batch_extrinsics = None
+        batch_intrinsics = None
+        print(f"[相機參數] 不傳入相機內外參，由模型自行估計 (auto mode)")
 
     sample_count = 0
     max_samples = 5
@@ -108,9 +124,10 @@ def analyze_depth():
         img_left = frame[:, :mid]
         img_right = frame[:, mid:]
 
-        # Rectify and buffer
-        rect_left, rect_right = rectifier.rectify(img_left, img_right)
-        frame_buffer.push(rect_left, rect_right)
+        # Optionally rectify and buffer
+        if enable_rectification and rectifier is not None:
+            img_left, img_right = rectifier.rectify(img_left, img_right)
+        frame_buffer.push(img_left, img_right)
 
         if not frame_buffer.is_ready():
             continue
