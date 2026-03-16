@@ -115,6 +115,7 @@ def inference_thread(
     result_lock: threading.Lock,
     camera_params_mode: str = "auto",
     temporal_frames: int = 3,
+    infer_gs: bool = False,
 ):
     """Pull temporal batches from buffer and run DA3 inference."""
     print("[Inference] 等待足夠的時序幀...")
@@ -130,6 +131,11 @@ def inference_thread(
         batch_extrinsics = None
         batch_intrinsics = None
         print("[Inference] 不傳入相機內外參，由模型自行估計 (auto mode)")
+
+    if infer_gs:
+        print("[Inference] Gaussian Head 模式: 啟用 ✅")
+    else:
+        print("[Inference] Gaussian Head 模式: 停用 (使用深度投影)")
 
     while not _shutdown.is_set():
         # Wait until buffer has enough frames
@@ -149,8 +155,13 @@ def inference_thread(
                 batch,
                 extrinsics=batch_extrinsics,
                 intrinsics=batch_intrinsics,
+                infer_gs=infer_gs,
             )
             decoded = depth_decoder.decode(raw_result)
+
+            # Keep model-predicted Gaussians for renderer when infer_gs is enabled.
+            if infer_gs and "gaussians" in raw_result:
+                decoded["gaussians"] = raw_result["gaussians"]
 
             # Also store the current left RGB frame for coloring
             # batch 排列: [L_{t-(N-1)}, ..., L_t, R_{t-(N-1)}, ..., R_t]
@@ -171,6 +182,101 @@ def inference_thread(
             time.sleep(0.1)
 
     print("[Inference] 執行緒結束")
+
+
+def _tensor_to_numpy(x):
+    """Safely convert a torch-like tensor or numpy array to numpy."""
+    if x is None:
+        return None
+    if hasattr(x, "detach"):
+        x = x.detach()
+    if hasattr(x, "cpu"):
+        x = x.cpu()
+    if hasattr(x, "numpy"):
+        return x.numpy()
+    return np.asarray(x)
+
+
+def _model_gaussians_to_point_cloud(
+    model_gaussians,
+    max_points: int = 500000,
+    min_opacity: float = 0.8,
+    max_scale_quantile: float = 0.7,
+) -> dict:
+    """Convert DA3 model Gaussian output to a lightweight point cloud for Viser."""
+    means = _tensor_to_numpy(getattr(model_gaussians, "means", None))
+    harmonics = _tensor_to_numpy(getattr(model_gaussians, "harmonics", None))
+    opacities = _tensor_to_numpy(getattr(model_gaussians, "opacities", None))
+    scales = _tensor_to_numpy(getattr(model_gaussians, "scales", None))
+
+    if means is None:
+        return {"means": np.empty((0, 3), dtype=np.float32), "colors": np.empty((0, 3), dtype=np.uint8), "num_points": 0}
+
+    # Expected shape is (B, G, 3); use first batch item.
+    if means.ndim == 3:
+        means = means[0]
+
+    # Get a stable RGB proxy from SH DC band.
+    if harmonics is not None:
+        if harmonics.ndim == 4:
+            harmonics = harmonics[0]
+        colors = harmonics[..., 0]  # (G, 3)
+        colors = 1.0 / (1.0 + np.exp(-colors))
+    else:
+        colors = np.ones((means.shape[0], 3), dtype=np.float32) * 0.8
+
+    # Opacity-based filtering to suppress uncertain splats.
+    if opacities is not None:
+        if opacities.ndim >= 2:
+            opacities = opacities[0]
+        if opacities.ndim > 1:
+            opacities = opacities[..., 0]
+        op_mask = opacities >= float(np.clip(min_opacity, 0.0, 1.0))
+    else:
+        op_mask = np.ones((means.shape[0],), dtype=bool)
+
+    # Scale-based pruning: very large gaussians usually make planar regions look thick.
+    if scales is not None:
+        if scales.ndim == 3:
+            scales = scales[0]
+        scale_radius = np.linalg.norm(scales, axis=-1)
+        q = float(np.clip(max_scale_quantile, 0.1, 1.0))
+        scale_thr = np.quantile(scale_radius, q)
+        sc_mask = scale_radius <= scale_thr
+    else:
+        sc_mask = np.ones((means.shape[0],), dtype=bool)
+
+    mask = op_mask & sc_mask
+    if np.any(mask):
+        means = means[mask]
+        colors = colors[mask]
+    else:
+        # Avoid empty render when thresholds are too strict.
+        topk = min(max_points, means.shape[0])
+        if topk == 0:
+            return {
+                "means": np.empty((0, 3), dtype=np.float32),
+                "colors": np.empty((0, 3), dtype=np.uint8),
+                "num_points": 0,
+            }
+        if opacities is not None:
+            idx = np.argsort(opacities)[-topk:]
+            means = means[idx]
+            colors = colors[idx]
+
+    num_points = int(means.shape[0])
+    if num_points > max_points:
+        idx = np.random.choice(num_points, max_points, replace=False)
+        means = means[idx]
+        colors = colors[idx]
+        num_points = max_points
+
+    colors = np.clip(colors * 255.0, 0, 255).astype(np.uint8)
+    return {
+        "means": means.astype(np.float32),
+        "colors": colors,
+        "num_points": num_points,
+    }
 
 
 # ─── Thread 3: Render ─────────────────────────────────────────
@@ -204,27 +310,32 @@ def render_thread(
             # Get dynamic confidence threshold from UI
             conf_thresh = viser_renderer.get_confidence_threshold()
 
-            # Get camera parameters
-            K_l = pose_manager.get_left_intrinsic().cpu().numpy()
-            ext_l = pose_manager.get_left_extrinsic().cpu().numpy()
+            model_gaussians = decoded.get("gaussians")
 
-            # Project left depth to Gaussians
-            depth_left = decoded["depth_left"]
-            conf_left = decoded["conf_left"]
-            color_left = decoded["color_image_left"]
+            if model_gaussians is not None:
+                gaussians = _model_gaussians_to_point_cloud(
+                    model_gaussians,
+                    max_points=gaussian_projector.max_points,
+                    min_opacity=conf_thresh,
+                    max_scale_quantile=0.7,
+                )
+            else:
+                # Fallback: project metric depth to pseudo-Gaussians.
+                K_l = pose_manager.get_left_intrinsic().cpu().numpy()
+                ext_l = pose_manager.get_left_extrinsic().cpu().numpy()
+                depth_left = decoded["depth_left"]
+                conf_left = decoded["conf_left"]
+                color_left = decoded["color_image_left"]
+                conf_mask = conf_left >= conf_thresh
 
-            # Apply confidence mask
-            conf_mask = conf_left >= conf_thresh
-
-            # Gaussian projection
-            gaussians = gaussian_projector.project(
-                depth=depth_left,
-                color_image=color_left,
-                intrinsic=K_l,
-                extrinsic=ext_l,
-                confidence=conf_left,
-                mask=conf_mask,
-            )
+                gaussians = gaussian_projector.project(
+                    depth=depth_left,
+                    color_image=color_left,
+                    intrinsic=K_l,
+                    extrinsic=ext_l,
+                    confidence=conf_left,
+                    mask=conf_mask,
+                )
 
             # Update Viser scene
             if gaussians["num_points"] > 0:
@@ -308,6 +419,7 @@ def main():
     )
 
     temporal_frames = buf_cfg["temporal_frames"]         # N: 每台相機的時序幀數
+    infer_gs = inf_cfg.get("infer_gs", False)
     print(f"[Init] 初始化幀環形緩衝區 (temporal_frames={temporal_frames})...")
     frame_buffer = CircularFrameBuffer(capacity=temporal_frames)
 
@@ -371,6 +483,7 @@ def main():
 
     camera_params_mode = inf_cfg.get("camera_params_mode", "auto")
     print(f"[Init] 相機參數模式: {camera_params_mode}")
+    print(f"[Init] infer_gs: {infer_gs}")
 
     t_inference = threading.Thread(
         target=inference_thread,
@@ -383,6 +496,7 @@ def main():
             "result_lock": result_lock,
             "camera_params_mode": camera_params_mode,
             "temporal_frames": temporal_frames,
+            "infer_gs": infer_gs,
         },
         daemon=True,
         name="InferenceThread",

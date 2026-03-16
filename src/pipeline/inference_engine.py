@@ -51,6 +51,7 @@ class InferenceEngine:
         use_fp16: bool = True,
         use_async: bool = True,
         process_res: int = 504,
+        use_gaussian_head: bool = False,
         device: str = "cuda",
     ):
         self.device = torch.device(device)
@@ -58,6 +59,7 @@ class InferenceEngine:
         self.use_async = use_async
         self.process_res = process_res
         self.model_name = model_name
+        self.use_gaussian_head = use_gaussian_head
 
         # Async inference stream
         self._stream = torch.cuda.Stream(device=self.device) if use_async else None
@@ -167,6 +169,7 @@ class InferenceEngine:
         frames: list[np.ndarray],
         extrinsics: Optional[torch.Tensor] = None,
         intrinsics: Optional[torch.Tensor] = None,
+        infer_gs: bool = False,
     ) -> dict:
         """Run inference on a batch of frames.
 
@@ -175,11 +178,13 @@ class InferenceEngine:
                     each (H, W, 3) uint8 BGR.
             extrinsics: (6, 4, 4) camera extrinsics tensor on GPU.
             intrinsics: (6, 3, 3) camera intrinsics tensor on GPU.
+                infer_gs: Enable Gaussian Splatting head inference for this call.
 
         Returns:
             Dictionary with:
                 'depth': (N, H, W) numpy float32 metric depth maps
                 'conf': (N, H, W) numpy float32 confidence maps
+                'gaussians': Gaussians object (if use_gaussian_head=True), else None
                 'time_ms': inference time in milliseconds
         """
         batch = self.preprocess_frames(frames)
@@ -191,7 +196,12 @@ class InferenceEngine:
         if self._backend == "tensorrt":
             return self._infer_tensorrt(batch)
         else:
-            return self._infer_pytorch(batch, extrinsics=ext, intrinsics=ixt)
+            return self._infer_pytorch(
+                batch,
+                extrinsics=ext,
+                intrinsics=ixt,
+                infer_gs=infer_gs,
+            )
 
     @torch.inference_mode()
     def infer_async(self, frames: list[np.ndarray]) -> None:
@@ -245,6 +255,7 @@ class InferenceEngine:
         extrinsics: Optional[torch.Tensor] = None,
         intrinsics: Optional[torch.Tensor] = None,
         is_async: bool = False,
+        infer_gs: bool = False,
     ) -> dict:
         """Run inference using PyTorch backend."""
         autocast_dtype = torch.float16 if self.use_fp16 else torch.float32
@@ -252,8 +263,16 @@ class InferenceEngine:
         torch.cuda.synchronize(self.device)
         t0 = time.perf_counter()
 
+        # Keep backward compatibility: either per-call infer_gs or init-time use_gaussian_head.
+        use_gs = bool(infer_gs or self.use_gaussian_head)
+
         with torch.autocast(device_type="cuda", dtype=autocast_dtype):
-            output = self._model.model(batch, extrinsics=extrinsics, intrinsics=intrinsics)
+            output = self._model.model(
+                batch,
+                extrinsics=extrinsics,
+                intrinsics=intrinsics,
+                infer_gs=use_gs,
+            )
 
         if not is_async:
             torch.cuda.synchronize(self.device)
@@ -271,6 +290,12 @@ class InferenceEngine:
         }
         if conf is not None:
             result["conf"] = conf.cpu().numpy()
+        
+        # Extract Gaussians if enabled
+        if use_gs and hasattr(output, 'gaussians') and output.gaussians is not None:
+            result["gaussians"] = output.gaussians
+        else:
+            result["gaussians"] = None
 
         return result
 

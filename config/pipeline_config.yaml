@@ -20,14 +20,14 @@ camera:
 
 # --- Temporal Buffering ---
 buffer:
-  temporal_frames: 1  # 每台相機輸入模型的時序幀數 N
+  temporal_frames:   # 每台相機輸入模型的時序幀數 N
                        # Batch 組成: {L_{t-(N-1)}, ..., L_t, R_{t-(N-1)}, ..., R_t}
                        # batch_size = temporal_frames * 2（左右各 N 幀）
                        # 建議值: 1（僅當前幀）、2（當前+前一幀）、3（預設）
 
 # --- Model / Inference ---
 inference:
-  model_name: "da3-giant"
+  model_name: "da3-large"
   # TensorRT engine path (if available). Set to null to use PyTorch fallback.
   trt_engine_path: null
   # Weights for PyTorch fallback
@@ -40,11 +40,12 @@ inference:
   # Camera parameters mode:
   #   "auto"     — 不傳入 extrinsics/intrinsics，讓模型自行估計
   #   "provided" — 使用校正後的相機內外參（由 calibration_path 載入）
-  camera_params_mode: "auto"
+  camera_params_mode: "provided"
+  use_gaussian_head: true  # 啟用高斯頭以增強細節表現
 
 # --- Gaussian Splatting ---
 gaussian:
-  confidence_threshold: 0.3   # 大幅降低以保留所有细节（包括低信心区域）
+  confidence_threshold: 0.8   # 大幅降低以保留所有细节（包括低信心区域）
   scale_multiplier: 2.0       # 大幅放大到2.0以强调微小的深度变化
   opacity_default: 0.95
   max_points: 500000

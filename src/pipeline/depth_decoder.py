@@ -4,9 +4,12 @@ Depth Decoder — Post-processing for DA3 inference output.
 Extracts the current time-step (t) depth maps for left and right views
 from the 6-frame batch output, applies confidence filtering, and
 optionally fuses the stereo depth maps.
+
+Also handles extraction of 3D Gaussian parameters when use_gaussian_head is enabled.
 """
 
 import numpy as np
+import torch
 
 
 class DepthDecoder:
@@ -39,6 +42,7 @@ class DepthDecoder:
             inference_result: Dictionary from InferenceEngine with:
                 'depth': (6, H, W) float32 depth maps
                 'conf':  (6, H, W) float32 confidence maps (optional)
+                'gaussians': Gaussians object (optional, if use_gaussian_head=True)
                 'time_ms': inference time
 
         Returns:
@@ -50,10 +54,12 @@ class DepthDecoder:
                 'mask_left': (H, W) bool mask where conf >= threshold
                 'mask_right': (H, W) bool mask
                 'depth_all': (6, H, W) all depth maps
+                'gaussians': Gaussians object (if available)
                 'time_ms': inference time
         """
         depth_all = inference_result["depth"]  # (6, H, W)
         time_ms = inference_result.get("time_ms", 0)
+        gaussians = inference_result.get("gaussians", None)
 
         # Extract current time step
         depth_left = depth_all[self.IDX_LEFT_T]   # (H, W)
@@ -84,6 +90,7 @@ class DepthDecoder:
             "mask_left": mask_left,
             "mask_right": mask_right,
             "depth_all": depth_all,
+            "gaussians": gaussians,
             "time_ms": time_ms,
         }
 
@@ -118,3 +125,33 @@ class DepthDecoder:
         fused_conf = np.maximum(conf_left, conf_right)
 
         return fused_depth, fused_conf
+
+    @staticmethod
+    def convert_gaussians_to_numpy(gaussians) -> dict | None:
+        """Convert Gaussians object from GPU tensors to NumPy arrays.
+
+        Args:
+            gaussians: Gaussians object with torch.Tensor fields, or None.
+
+        Returns:
+            Dictionary with numpy arrays, or None if input is None.
+        """
+        if gaussians is None:
+            return None
+
+        result = {}
+        for key in ["means", "scales", "rotations", "harmonics", "opacities"]:
+            if hasattr(gaussians, key):
+                tensor = getattr(gaussians, key)
+                if tensor is not None:
+                    if isinstance(tensor, torch.Tensor):
+                        result[key] = tensor.detach().cpu().numpy()
+                    else:
+                        result[key] = tensor
+                else:
+                    result[key] = None
+            else:
+                result[key] = None
+
+        return result
+
