@@ -412,13 +412,15 @@ def main():
         print("\n[Init] 跳過立體校正器初始化 (enable_rectification: false)")
         rectifier = None
 
+    temporal_frames = buf_cfg["temporal_frames"]         # N: 每台相機的時序幀數
+
     print("[Init] 初始化位姿管理器...")
     pose_manager = PoseManager(
         calibration_path=cam_cfg["calibration_path"],
         image_size=image_size,
+        temporal_frames=temporal_frames,
     )
 
-    temporal_frames = buf_cfg["temporal_frames"]         # N: 每台相機的時序幀數
     infer_gs = inf_cfg.get("infer_gs", False)
     print(f"[Init] 初始化幀環形緩衝區 (temporal_frames={temporal_frames})...")
     frame_buffer = CircularFrameBuffer(capacity=temporal_frames)

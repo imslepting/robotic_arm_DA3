@@ -20,7 +20,7 @@ camera:
 
 # --- Temporal Buffering ---
 buffer:
-  temporal_frames:   # 每台相機輸入模型的時序幀數 N
+  temporal_frames: 1  # 每台相機輸入模型的時序幀數 N
                        # Batch 組成: {L_{t-(N-1)}, ..., L_t, R_{t-(N-1)}, ..., R_t}
                        # batch_size = temporal_frames * 2（左右各 N 幀）
                        # 建議值: 1（僅當前幀）、2（當前+前一幀）、3（預設）
@@ -35,13 +35,13 @@ inference:
   config_path: null   # e.g. "./weights/config.json"
   batch_size: null    # 自動計算: buffer.temporal_frames * 2（勿手動設定）
   process_res: 504    # DA3 internal processing resolution
-  use_fp16: true
+  use_fp16: false
   use_async: true     # Use torch.cuda.Stream for non-blocking inference
   # Camera parameters mode:
   #   "auto"     — 不傳入 extrinsics/intrinsics，讓模型自行估計
   #   "provided" — 使用校正後的相機內外參（由 calibration_path 載入）
-  camera_params_mode: "provided"
-  use_gaussian_head: true  # 啟用高斯頭以增強細節表現
+  camera_params_mode: "auto"
+  use_gaussian_head: false  # 啟用高斯頭以增強細節表現
 
 # --- Gaussian Splatting ---
 gaussian:

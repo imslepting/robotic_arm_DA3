@@ -14,7 +14,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Optional
-
+import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -133,35 +133,33 @@ class InferenceEngine:
         self._backend = "pytorch"
 
     def preprocess_frames(self, frames: list[np.ndarray]) -> torch.Tensor:
-        """Convert a list of BGR uint8 frames to a normalized GPU tensor.
-
-        Args:
-            frames: List of N frames, each (H, W, 3) uint8 BGR.
-
-        Returns:
-            Tensor of shape (1, N, 3, H, W) float32 on GPU, ImageNet-normalized.
-        """
+        """Convert a list of BGR uint8 frames to a normalized GPU tensor."""
         tensors = []
         for frame in frames:
-            # BGR → RGB, HWC → CHW, [0,255] → [0,1]
-            img = frame[..., ::-1].copy()  # BGR to RGB
-            t = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
+            # 1. BGR 到 RGB
+            img = frame[..., ::-1].copy()
+            
+            # 2. 用 OpenCV 做正確的縮放 (避免 F.interpolate 可能產生的對齊問題)
+            h, w = img.shape[:2]
+            if max(h, w) != self.process_res:
+                scale = self.process_res / max(h, w)
+                new_h = int(h * scale) // 14 * 14
+                new_w = int(w * scale) // 14 * 14
+                img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+            # 3. 轉成 Tensor [0, 1] 並放到 GPU
+            t = torch.from_numpy(img).permute(2, 0, 1).float().to(self.device) / 255.0
+            
+            # --- 關鍵修正 ---
+            # 如果發現依然有網格，可以註解掉下面這行 Normalize
+            # 有些 DinoV2/DA3 實作是不需要這層 ImageNet Normalization 的，加上反而會讓 Patch 大亂
+            # t = (t - self.MEAN) / self.STD
+            
             tensors.append(t)
 
-        batch = torch.stack(tensors, dim=0).to(self.device)  # (N, 3, H, W)
-
-        # Resize to process_res if needed
-        _, _, h, w = batch.shape
-        if max(h, w) != self.process_res:
-            scale = self.process_res / max(h, w)
-            new_h = int(h * scale) // 14 * 14  # Align to patch size
-            new_w = int(w * scale) // 14 * 14
-            batch = F.interpolate(batch, size=(new_h, new_w), mode="bilinear", align_corners=False)
-
-        # ImageNet normalize
-        batch = (batch - self.MEAN) / self.STD
-
+        print(f"DEBUG: Frame shape={tensors[0].shape}"); batch = torch.stack(tensors, dim=0)  # (N, 3, H', W')
         return batch.unsqueeze(0)  # (1, N, 3, H', W')
+
 
     @torch.inference_mode()
     def infer(
@@ -257,13 +255,11 @@ class InferenceEngine:
         is_async: bool = False,
         infer_gs: bool = False,
     ) -> dict:
-        """Run inference using PyTorch backend."""
         autocast_dtype = torch.float16 if self.use_fp16 else torch.float32
 
         torch.cuda.synchronize(self.device)
         t0 = time.perf_counter()
 
-        # Keep backward compatibility: either per-call infer_gs or init-time use_gaussian_head.
         use_gs = bool(infer_gs or self.use_gaussian_head)
 
         with torch.autocast(device_type="cuda", dtype=autocast_dtype):
@@ -280,9 +276,13 @@ class InferenceEngine:
         t1 = time.perf_counter()
         time_ms = (t1 - t0) * 1000
 
-        # Extract results
-        depth = output.depth.squeeze(0).float()  # (N, H, W)
-        conf = output.depth_conf.squeeze(0).float() if hasattr(output, 'depth_conf') and output.depth_conf is not None else None
+        # 如果 output 發生意外結構解包錯誤，這裡能擋下並告知！
+        try:
+            depth = output.depth.squeeze(0).float()  # (N, H, W)
+            conf = output.depth_conf.squeeze(0).float() if hasattr(output, 'depth_conf') and output.depth_conf is not None else None
+        except Exception as e:
+            print(f"DEBUG Output type: dict keys: {list(output.keys())} or {type(output)}")
+            raise
 
         result = {
             "depth": depth.cpu().numpy(),
@@ -291,13 +291,13 @@ class InferenceEngine:
         if conf is not None:
             result["conf"] = conf.cpu().numpy()
         
-        # Extract Gaussians if enabled
         if use_gs and hasattr(output, 'gaussians') and output.gaussians is not None:
             result["gaussians"] = output.gaussians
         else:
             result["gaussians"] = None
 
         return result
+
 
     def _infer_tensorrt(self, batch: torch.Tensor, is_async: bool = False) -> dict:
         """Run inference using TensorRT backend."""

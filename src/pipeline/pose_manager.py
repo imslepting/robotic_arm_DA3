@@ -32,6 +32,7 @@ class PoseManager:
         calibration_path: str,
         image_size: tuple[int, int] = (640, 480),
         device: str = "cuda",
+        temporal_frames: int = 3,
     ):
         self.device = torch.device(device)
         self.image_size = image_size
@@ -58,11 +59,11 @@ class PoseManager:
         ext_r[:3, :3] = R.astype(np.float32)
         ext_r[:3, 3] = T.flatten().astype(np.float32)
 
-        # Build batch tensors: 6 frames
-        # Intrinsics: (6, 3, 3)
-        intrinsics = np.stack([K_rect_l] * 3 + [K_rect_r] * 3, axis=0)
-        # Extrinsics: (6, 4, 4)
-        extrinsics = np.stack([ext_l] * 3 + [ext_r] * 3, axis=0)
+        # Build batch tensors: temporal_frames * 2 frames
+        # Intrinsics: (2*N, 3, 3)
+        intrinsics = np.stack([K_rect_l] * temporal_frames + [K_rect_r] * temporal_frames, axis=0)
+        # Extrinsics: (2*N, 4, 4)
+        extrinsics = np.stack([ext_l] * temporal_frames + [ext_r] * temporal_frames, axis=0)
 
         # Convert to GPU constant tensors
         self._intrinsics = torch.from_numpy(intrinsics).to(self.device)
